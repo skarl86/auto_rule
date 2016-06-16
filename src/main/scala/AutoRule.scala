@@ -94,7 +94,6 @@ object AutoRule {
   /**
     * Row의 값을 넣어주기 위한 사전 처리 작업을
     * 수행하는 함수.
- *
     * @param fieldNames Field 이름 리스트
     * @return             (Golf -> 1), (Person -> 2) ... 와 같은 형태의 Map.
     */
@@ -109,7 +108,6 @@ object AutoRule {
   /**
     * 각 Shot의 포함된 Object에 갯수를
     * DataFrame으로 만들어주는 함수.
- *
     * @param countEachShotInVideoRDD  새로운 DataFrame의 기반이 되는 RDD
     * @param fieldNames                 DataFrame 의 Header에 들어갈 Field 이름.
     * @param sqlContext                 DataFrame을 만들기 위한 SQL Context
@@ -148,6 +146,11 @@ object AutoRule {
       .sortBy(_._1, true)
   }
 
+  /**
+    *
+    * @param golfEventTripleRDD
+    * @return
+    */
   def getCountEachShotObjectNameInVideoRDD(golfEventTripleRDD:RDD[Triple]) = {
     val countEachShotInVideoRDD = golfEventTripleRDD
       .map{case (s, p, o) => (eraseURI(s), o)}
@@ -160,6 +163,12 @@ object AutoRule {
       .sortBy(_._1, true)
   }
 
+  /**
+    *
+    * @param objectLabelTripleRDD
+    * @param activityTripleRDD
+    * @return
+    */
   def getTotalLabelCount(objectLabelTripleRDD:RDD[Tuple], activityTripleRDD:RDD[Triple]): RDD[(String, Int)] = {
     val objectCountRDD = activityTripleRDD
       .map{ case (s, p, o) => (o, 1) }
@@ -171,6 +180,12 @@ object AutoRule {
       .sortBy(_._2, false)
   }
 
+  /**
+    *
+    * @param eventTripleRDD
+    * @param withoutIndex
+    * @return
+    */
   def getNumberOfObjectInShotRDD(eventTripleRDD:RDD[Triple], withoutIndex:Boolean = false) ={
     var rstRDD:RDD[(String, Int)] = eventTripleRDD.map{ case (s, p, o) => (eraseVideoIDString(o) , 1)}
     val path = if(withoutIndex) { "objectCountWithoutIndex" } else { "objectCount" }
@@ -183,11 +198,21 @@ object AutoRule {
       .sortBy(_._2, false)
 
   }
+
+  /**
+    *
+    * @param level
+    */
   def setLogLevel(level: Level): Unit = {
     Logger.getLogger("org").setLevel(level)
     Logger.getLogger("akka").setLevel(level)
   }
 
+  /**
+    *
+    * @param lines
+    * @return
+    */
   def NTripleParser(lines: Iterator[String]) = {
     val TripleParser = new Regex("(<[^\\s]*>)|(_:[^\\s]*)|(\".*\")")
     for (line <- lines) yield {
@@ -197,14 +222,37 @@ object AutoRule {
     }
   }
 
+  /**
+    *
+    * @param triple
+    * @return
+    */
   def getTypeTriple(triple: RDD[Triple]): RDD[Tuple] = { getPredicate(triple, RDF_TYPE) }
+
+  /**
+    *
+    * @param triple
+    * @return
+    */
   def getLabelTriple(triple: RDD[Triple]): RDD[Tuple] ={ getPredicate(triple, RDF_LABEL) }
 
+  /**
+    *
+    * @param triple
+    * @param predicate
+    * @return
+    */
   def getPredicate(triple: RDD[Triple], predicate:String): RDD[Tuple] = {
     triple
       .filter{case (s, p, o) => p.contains(predicate)}
       .map{case (s, p, o) => (s, o)}
   }
+
+  /**
+    *
+    * @param videoID
+    * @return
+    */
   def isGolfVideo(videoID: String): Boolean = {
     // Golf Activity는 Video 1번 부터 100번 까지 이다.
     val reg = new Regex("([0-9]+)")
@@ -214,14 +262,31 @@ object AutoRule {
     return 100 >= id
   }
 
+  /**
+    *
+    * @param videoID
+    * @return
+    */
   def eraseVideoIDString(videoID:String): String = {
     val reg = new Regex("_(.+)>")
     reg.findAllIn(videoID).matchData.next().group(1)
   }
+
+  /**
+    *
+    * @param objectName
+    * @return
+    */
   def eraseIndex(objectName:String): String = {
     val reg = new Regex("(\\w+[a-z]+)")
     reg.findAllIn(objectName).matchData.next().group(1)
   }
+
+  /**
+    *
+    * @param str
+    * @return
+    */
   def eraseURI(str:String): String ={
     val reg = new Regex("([A-Z]\\w+)")
     if(reg == null)
@@ -230,19 +295,34 @@ object AutoRule {
     }else{
       reg.findAllIn(str).matchData.next().group(1)
     }
-
   }
 
+  /**
+    *
+    * @param tripleRDD
+    * @return
+    */
   def getHasVisualAndHasAural(tripleRDD: RDD[Triple]) = {
     val hasVisualTripleRDD = tripleRDD.filter{case (s, p, o) => p.contains("hasVisual")}
     val hasAuralTripleRDD = tripleRDD.filter{case (s, p, o) => p.contains("hasAural")}
 
     hasAuralTripleRDD.union(hasVisualTripleRDD)
   }
+
+  /**
+    *
+    * @param tripleRDD
+    * @return
+    */
   def getGolfEventTripleRDD(tripleRDD: RDD[Triple]): RDD[Triple] = {
     tripleRDD.filter{case (s, p, o) => isGolfVideo(s)}
   }
 
+  /**
+    *
+    * @param tripleRDD
+    * @return
+    */
   def makeSchema(tripleRDD: RDD[Triple]): RDD[String] = {
     tripleRDD.filter{case (s, p, o) => p.contains("#type")}.map{case(s, p, o) => o}.distinct()
   }
