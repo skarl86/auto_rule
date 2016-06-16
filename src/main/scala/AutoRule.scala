@@ -1,6 +1,12 @@
+import java.text.SimpleDateFormat
+import java.util.{Calendar, Date}
+
+import com.sun.org.apache.xalan.internal.xsltc.compiler.util.IntType
 import org.apache.log4j.{Level, Logger}
 import org.apache.spark.rdd.RDD
-import org.apache.spark.{SparkContext, SparkConf}
+import org.apache.spark.{SparkConf, SparkContext}
+import org.apache.spark.sql._
+import org.apache.spark.sql.types.{IntegerType, StringType, StructField, StructType}
 
 import scala.util.matching.Regex
 
@@ -13,25 +19,34 @@ object AutoRule {
 
   val RDF_LABEL = "<http://www.w3.org/2000/01/rdf-schema#label>"
   val RDF_TYPE = "<http://www.w3.org/1999/02/22-rdf-syntax-ns#type>"
+  val FIELD_NAMES = List("VideoShotID", "Person", "Sound", "Thing", "WhatObject", "Where")
 
   def main(args: Array[String]) {
     setLogLevel(Level.WARN)
 
     val conf = new SparkConf().setAppName("Auto Rule").setMaster("local[*]")
     val sc = new SparkContext(conf)
+    val sqlContext = new SQLContext(sc)
 
     val path = "data/PM_fi.0.n3"
 
-    val tripleRDD = sc.textFile(path).mapPartitions(NTripleParser, true)
-    val hasVisualAndHasAuralTripleRDD = getHasVisualAndHasAural(tripleRDD)
-    val objectLabelTupleRDD = getLabel(tripleRDD)
-    val objectTypeTupleRDD = getType(tripleRDD)
-    val golfActivityTripleRDD = getGolfActivityRDD(hasVisualAndHasAuralTripleRDD)
+    val inputTripleRDD = sc.textFile(path).mapPartitions(NTripleParser, true)
+    val hasVisualAndHasAuralTripleRDD = getHasVisualAndHasAural(inputTripleRDD)
+    val objectLabelTupleRDD = getLabelTriple(inputTripleRDD)
+    val objectTypeTupleRDD = getTypeTriple(inputTripleRDD)
+    val golfEventTripleRDD = getGolfEventTripleRDD(hasVisualAndHasAuralTripleRDD)
 
-    getObjectCountInShot(golfActivityTripleRDD, objectLabelTupleRDD)
-//    getTotalShotCount(golfActivityTripleRDD)
-//    getTotalShotCount(golfActivityTripleRDD, true)
-//    getTotalLabelCount(objectLabelTupleRDD, golfActivityTripleRDD)
+    val resultRDD = getCountEachShotInVideoRDD(golfEventTripleRDD, objectTypeTupleRDD)
+
+    val resultDF = getCountEachShotInVideoDF(resultRDD, sqlContext)
+    resultDF.coalesce(1).write
+      .format("com.databricks.spark.csv").option("header","true")
+      .save(generatePath("count_each_shot_in_video"))
+
+//    result.coalesce(1).saveAsTextFile("CountEachShotByObjectInVideo-" + System.currentTimeMillis())
+//    getTotalShotCount(golfEventTripleRDD)
+//    getTotalShotCount(golfEventTripleRDD, true)
+//    getTotalLabelCount(objectLabelTupleRDD, golfEventTripleRDD)
 //    golfActivityRDD
 //      .map{ case (s, p, o) => (eraseVideoIDString(o) , 1)}
 //      .map{ case (k, v) => (eraseIndex(k), v) }
@@ -39,20 +54,52 @@ object AutoRule {
 //      .sortBy(_._2, false)
 //      .coalesce(1).saveAsTextFile("output")
   }
+  def generatePath(path:String): String ={
+    val now = Calendar.getInstance().getTime()
+    val minuteFormat = new SimpleDateFormat("yyyyhhmmss")
+    val currentMinuteAsString = minuteFormat.format(now)
 
-  def getObjectCountInShot(golfActivityTripleRDD:RDD[Triple], typeTripleRDD:RDD[Tuple]) = {
-    val t1 = golfActivityTripleRDD
+    List(path, currentMinuteAsString).mkString("-")
+  }
+  def convertListToRow(videoShotID:String, list:List[(String, Int)]): Row = {
+    val states = initMap()
+    for((c, count) <- list){
+      states(c) = count
+    }
+    Row(videoShotID, states(FIELD_NAMES(1)), states(FIELD_NAMES(2)), states(FIELD_NAMES(3)), states(FIELD_NAMES(4)), states(FIELD_NAMES(5)))
+  }
+  def initMap(): scala.collection.mutable.Map[String, Int] = {
+    val map = scala.collection.mutable.Map[String, Int]()
+    for (fieldName <- FIELD_NAMES){
+      map(fieldName) = 0
+    }
+
+    map
+  }
+  def getCountEachShotInVideoDF(countEachShotInVideoRDD:RDD[(String, List[(String, Int)])], sqlContext:SQLContext) = {
+    val rowRDD = countEachShotInVideoRDD
+      .map{case (videoShotID, elementList) => convertListToRow(videoShotID, elementList)}
+
+    val schema = StructType(
+      FIELD_NAMES.map {
+        case "VideoShotID" => StructField("VideoShotID", StringType, true)
+        case fieldName => StructField(fieldName, IntegerType, true)
+      })
+
+    sqlContext.createDataFrame(rowRDD, schema)
+  }
+  def getCountEachShotInVideoRDD(golfEventTripleRDD:RDD[Triple], typeTripleRDD:RDD[Tuple]) = {
+    val countEachShotInVideoRDD = golfEventTripleRDD
       .map{case (s, p, o) => (s, o)}
-    t1
+    countEachShotInVideoRDD
       .map{case (s, o) => (o, s)}
       .join(typeTripleRDD)
       .map{case (o, (s, c)) =>  ((s, c), 1)}
       .reduceByKey(_ + _)
-      .map{case ((s, c), count) => (eraseURI(s), (c, count))}
+      .map{case ((s, c), count) => (eraseURI(s), (eraseURI(c), count))}
       .groupByKey()
-      .map{case (s, obj_buffer) => (s, obj_buffer.toList)}
+      .map{case (s, obj_buffer) => (s, obj_buffer.toList.sorted)}
       .sortBy(_._1, true)
-      .coalesce(1).saveAsTextFile("output2")
   }
 
   def getTotalLabelCount(objectLabelTripleRDD:RDD[Tuple], activityTripleRDD:RDD[Triple]): Unit = {
@@ -64,7 +111,6 @@ object AutoRule {
       .map{ case (o, (l, c)) => (l, c)}
       .reduceByKey(_ + _)
       .sortBy(_._2, false)
-      .coalesce(1).saveAsTextFile("labelCount")
   }
 
   def getTotalShotCount(activityTripleRDD:RDD[Triple], withoutIndex:Boolean = false) ={
@@ -77,7 +123,6 @@ object AutoRule {
     rstRDD
       .reduceByKey(_ + _)
       .sortBy(_._2, false)
-      .coalesce(1).saveAsTextFile(path)
 
   }
   def setLogLevel(level: Level): Unit = {
@@ -96,8 +141,8 @@ object AutoRule {
     }
   }
 
-  def getType(triple: RDD[Triple]): RDD[Tuple] = { getPredicate(triple, RDF_TYPE) }
-  def getLabel(triple: RDD[Triple]): RDD[Tuple] ={ getPredicate(triple, RDF_LABEL) }
+  def getTypeTriple(triple: RDD[Triple]): RDD[Tuple] = { getPredicate(triple, RDF_TYPE) }
+  def getLabelTriple(triple: RDD[Triple]): RDD[Tuple] ={ getPredicate(triple, RDF_LABEL) }
 
   def getPredicate(triple: RDD[Triple], predicate:String): RDD[Tuple] = {
     triple
@@ -138,7 +183,7 @@ object AutoRule {
 
     hasAuralTripleRDD.union(hasVisualTripleRDD)
   }
-  def getGolfActivityRDD(tripleRDD: RDD[Triple]): RDD[Triple] = {
+  def getGolfEventTripleRDD(tripleRDD: RDD[Triple]): RDD[Triple] = {
     tripleRDD.filter{case (s, p, o) => isGolfVideo(s)}
   }
 
