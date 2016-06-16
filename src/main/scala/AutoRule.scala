@@ -1,7 +1,6 @@
 import java.text.SimpleDateFormat
 import java.util.{Calendar, Date}
 
-import com.sun.org.apache.xalan.internal.xsltc.compiler.util.IntType
 import org.apache.log4j.{Level, Logger}
 import org.apache.spark.rdd.RDD
 import org.apache.spark.{SparkConf, SparkContext}
@@ -19,7 +18,7 @@ object AutoRule {
 
   val RDF_LABEL = "<http://www.w3.org/2000/01/rdf-schema#label>"
   val RDF_TYPE = "<http://www.w3.org/1999/02/22-rdf-syntax-ns#type>"
-  val FIELD_NAMES = List("VideoShotID", "Person", "Sound", "Thing", "WhatObject", "Where")
+  val DATAFRAME_OUTPUT_FORMAT = "com.databricks.spark.csv"
 
   def main(args: Array[String]) {
     setLogLevel(Level.WARN)
@@ -34,61 +33,108 @@ object AutoRule {
     val hasVisualAndHasAuralTripleRDD = getHasVisualAndHasAural(inputTripleRDD)
     val objectLabelTupleRDD = getLabelTriple(inputTripleRDD)
     val objectTypeTupleRDD = getTypeTriple(inputTripleRDD)
+
+    // 전체 Triple 중에 Golf Event만 추출한 RDD
     val golfEventTripleRDD = getGolfEventTripleRDD(hasVisualAndHasAuralTripleRDD)
 
-    val resultRDD = getCountEachShotInVideoRDD(golfEventTripleRDD, objectTypeTupleRDD)
+    // Golｆ Event의 Shot에 포함 된 Object 별 갯수 정보를 가지고 있는 RDD
+    val totalCountRDD = getNumberOfObjectInShotRDD(golfEventTripleRDD, true)
+    totalCountRDD.coalesce(1).saveAsTextFile(generatePath("total_object_in_shot"))
 
-    val resultDF = getCountEachShotInVideoDF(resultRDD, sqlContext)
+    // Golf Event의 Shot마다 Object의 갯수 정보를 DataFrame으로 만들기 위한
+    // 사전 작업으로 DataFrame의 Header 에 해당하는 Field Name을 가져오기 위한 작업.
+    val objectNameFieldNames = golfEventTripleRDD.map{case (s, p, o) => eraseIndex(eraseVideoIDString(o))}.distinct().collect().toList
+
+    // DataFrame의 기반이 될 RDD로
+    // Event의 Shot 마다 각각의 Object 갯수 정보를 가지고 있는 RDD.
+    val resultRDD = getCountEachShotObjectNameInVideoRDD(golfEventTripleRDD)
+
+    // Event의 Shot 마다 각각의 Object 갯수 정보를 가지고 있는 RDD를
+    // 기반으로 DataFrame 생성.
+    val resultDF = getCountEachShotInVideoDF(resultRDD, objectNameFieldNames, sqlContext)
     resultDF.coalesce(1).write
-      .format("com.databricks.spark.csv").option("header","true")
-      .save(generatePath("count_each_shot_in_video"))
-
-//    result.coalesce(1).saveAsTextFile("CountEachShotByObjectInVideo-" + System.currentTimeMillis())
-//    getTotalShotCount(golfEventTripleRDD)
-//    getTotalShotCount(golfEventTripleRDD, true)
-//    getTotalLabelCount(objectLabelTupleRDD, golfEventTripleRDD)
-//    golfActivityRDD
-//      .map{ case (s, p, o) => (eraseVideoIDString(o) , 1)}
-//      .map{ case (k, v) => (eraseIndex(k), v) }
-//      .reduceByKey(_ + _)
-//      .sortBy(_._2, false)
-//      .coalesce(1).saveAsTextFile("output")
+      .format(DATAFRAME_OUTPUT_FORMAT).option("header", "true")
+      .save(generatePath("count_each_shot_object_name_in_video"))
   }
-  def generatePath(path:String): String ={
+
+  /**
+    * * RDD 를 파일로 저장할 때
+    * 저장 경로를 중복되지 않도록
+    * Unique한 주소를 생성 해주는 함수
+ *
+    * @param path 사용자가 직접 입력한 경로.
+    * @return Unique 한 path
+    */
+  def generatePath(path:String = ""): String ={
     val now = Calendar.getInstance().getTime()
     val minuteFormat = new SimpleDateFormat("yyyyhhmmss")
     val currentMinuteAsString = minuteFormat.format(now)
 
     List(path, currentMinuteAsString).mkString("-")
   }
-  def convertListToRow(videoShotID:String, list:List[(String, Int)]): Row = {
-    val states = initMap()
+
+  /**
+    * 각 Shot의 포함된 Object에 갯수를
+    * DataFrame으로 만들기 전 Row 형태로 변환이 필요한데,
+    * 이를 위해 만든 함수
+ *
+    * @param videoShotID  shot의 고유 ID
+    * @param list          ("Golf", golf object의 갯수)
+    * @param fieldNames   DataFrame의 StructType을 만들기 위한 테이블의 Field 이름 리스트
+    * @return               (ShotID, object의 갯수, object의 갯수, ... )
+    */
+  def convertListToRow(videoShotID:String, list:List[(String, Int)], fieldNames:List[String]): Row = {
+    val states = initMap(fieldNames)
     for((c, count) <- list){
       states(c) = count
     }
-    Row(videoShotID, states(FIELD_NAMES(1)), states(FIELD_NAMES(2)), states(FIELD_NAMES(3)), states(FIELD_NAMES(4)), states(FIELD_NAMES(5)))
+    Row.fromSeq(List(videoShotID) ++ fieldNames.map(fieldName => states(fieldName)))
   }
-  def initMap(): scala.collection.mutable.Map[String, Int] = {
+
+  /**
+    * Row의 값을 넣어주기 위한 사전 처리 작업을
+    * 수행하는 함수.
+ *
+    * @param fieldNames Field 이름 리스트
+    * @return             (Golf -> 1), (Person -> 2) ... 와 같은 형태의 Map.
+    */
+  def initMap(fieldNames:List[String]): scala.collection.mutable.Map[String, Int] = {
     val map = scala.collection.mutable.Map[String, Int]()
-    for (fieldName <- FIELD_NAMES){
+    for (fieldName <- fieldNames){
       map(fieldName) = 0
     }
-
     map
   }
-  def getCountEachShotInVideoDF(countEachShotInVideoRDD:RDD[(String, List[(String, Int)])], sqlContext:SQLContext) = {
+
+  /**
+    * 각 Shot의 포함된 Object에 갯수를
+    * DataFrame으로 만들어주는 함수.
+ *
+    * @param countEachShotInVideoRDD  새로운 DataFrame의 기반이 되는 RDD
+    * @param fieldNames                 DataFrame 의 Header에 들어갈 Field 이름.
+    * @param sqlContext                 DataFrame을 만들기 위한 SQL Context
+    * @return                            DataFrame 객체.
+    */
+  def getCountEachShotInVideoDF(countEachShotInVideoRDD:RDD[(String, List[(String, Int)])], fieldNames:List[String], sqlContext:SQLContext) = {
     val rowRDD = countEachShotInVideoRDD
-      .map{case (videoShotID, elementList) => convertListToRow(videoShotID, elementList)}
-
+      .map{case (videoShotID, elementList) => convertListToRow(videoShotID, elementList, fieldNames)}
+    val newFieldNames = List("VideoShotID") ++ fieldNames
     val schema = StructType(
-      FIELD_NAMES.map {
-        case "VideoShotID" => StructField("VideoShotID", StringType, true)
+      newFieldNames.map {
+        case fieldName@"VideoShotID" => StructField(fieldName, StringType, true)
         case fieldName => StructField(fieldName, IntegerType, true)
-      })
-
+      }
+    )
     sqlContext.createDataFrame(rowRDD, schema)
   }
-  def getCountEachShotInVideoRDD(golfEventTripleRDD:RDD[Triple], typeTripleRDD:RDD[Tuple]) = {
+
+  /**
+    *
+    * @param golfEventTripleRDD
+    * @param typeTripleRDD
+    * @return
+    */
+  def getCountEachShotClassInVideoRDD(golfEventTripleRDD:RDD[Triple], typeTripleRDD:RDD[Tuple]) = {
     val countEachShotInVideoRDD = golfEventTripleRDD
       .map{case (s, p, o) => (s, o)}
     countEachShotInVideoRDD
@@ -102,7 +148,19 @@ object AutoRule {
       .sortBy(_._1, true)
   }
 
-  def getTotalLabelCount(objectLabelTripleRDD:RDD[Tuple], activityTripleRDD:RDD[Triple]): Unit = {
+  def getCountEachShotObjectNameInVideoRDD(golfEventTripleRDD:RDD[Triple]) = {
+    val countEachShotInVideoRDD = golfEventTripleRDD
+      .map{case (s, p, o) => (eraseURI(s), o)}
+    countEachShotInVideoRDD
+      .map{case (s, o) =>  ((s, eraseIndex(eraseVideoIDString(o))), 1)}
+      .reduceByKey(_ + _)
+      .map{case ((s, o_name), count) => (s, (o_name, count))}
+      .groupByKey()
+      .map{case (s, obj_buffer) => (s, obj_buffer.toList.sorted)}
+      .sortBy(_._1, true)
+  }
+
+  def getTotalLabelCount(objectLabelTripleRDD:RDD[Tuple], activityTripleRDD:RDD[Triple]): RDD[(String, Int)] = {
     val objectCountRDD = activityTripleRDD
       .map{ case (s, p, o) => (o, 1) }
       .reduceByKey(_ + _)
@@ -113,8 +171,8 @@ object AutoRule {
       .sortBy(_._2, false)
   }
 
-  def getTotalShotCount(activityTripleRDD:RDD[Triple], withoutIndex:Boolean = false) ={
-    var rstRDD:RDD[(String, Int)] = activityTripleRDD.map{ case (s, p, o) => (eraseVideoIDString(o) , 1)}
+  def getNumberOfObjectInShotRDD(eventTripleRDD:RDD[Triple], withoutIndex:Boolean = false) ={
+    var rstRDD:RDD[(String, Int)] = eventTripleRDD.map{ case (s, p, o) => (eraseVideoIDString(o) , 1)}
     val path = if(withoutIndex) { "objectCountWithoutIndex" } else { "objectCount" }
     if(withoutIndex){
       rstRDD = rstRDD
@@ -135,8 +193,6 @@ object AutoRule {
     for (line <- lines) yield {
       val tokens = TripleParser.findAllIn(line)
       val (s, p, o) = (tokens.next(), tokens.next(), tokens.next())
-      //      if (p == RDF_TYPE) (s, "type", o)
-      //      else (s, p, o)
       (s, p, o)
     }
   }
@@ -170,7 +226,7 @@ object AutoRule {
     val reg = new Regex("([A-Z]\\w+)")
     if(reg == null)
     {
-      return str
+      str
     }else{
       reg.findAllIn(str).matchData.next().group(1)
     }
