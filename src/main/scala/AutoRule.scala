@@ -12,6 +12,7 @@ object AutoRule {
   type Tuple = (String, String)
 
   val RDF_LABEL = "<http://www.w3.org/2000/01/rdf-schema#label>"
+  val RDF_TYPE = "<http://www.w3.org/1999/02/22-rdf-syntax-ns#type>"
 
   def main(args: Array[String]) {
     setLogLevel(Level.WARN)
@@ -23,12 +24,14 @@ object AutoRule {
 
     val tripleRDD = sc.textFile(path).mapPartitions(NTripleParser, true)
     val hasVisualAndHasAuralTripleRDD = getHasVisualAndHasAural(tripleRDD)
-    val objectLabelTripleRDD = getLabel(tripleRDD)
-    val golfActivityRDD = getGolfActivityRDD(hasVisualAndHasAuralTripleRDD)
+    val objectLabelTupleRDD = getLabel(tripleRDD)
+    val objectTypeTupleRDD = getType(tripleRDD)
+    val golfActivityTripleRDD = getGolfActivityRDD(hasVisualAndHasAuralTripleRDD)
 
-    getObjectCount(golfActivityRDD)
-    getObjectCount(golfActivityRDD, true)
-    getLabelCount(objectLabelTripleRDD, golfActivityRDD)
+    getObjectCountInShot(golfActivityTripleRDD, objectLabelTupleRDD)
+//    getTotalShotCount(golfActivityTripleRDD)
+//    getTotalShotCount(golfActivityTripleRDD, true)
+//    getTotalLabelCount(objectLabelTupleRDD, golfActivityTripleRDD)
 //    golfActivityRDD
 //      .map{ case (s, p, o) => (eraseVideoIDString(o) , 1)}
 //      .map{ case (k, v) => (eraseIndex(k), v) }
@@ -37,7 +40,22 @@ object AutoRule {
 //      .coalesce(1).saveAsTextFile("output")
   }
 
-  def getLabelCount(objectLabelTripleRDD:RDD[Tuple], activityTripleRDD:RDD[Triple]): Unit = {
+  def getObjectCountInShot(golfActivityTripleRDD:RDD[Triple], typeTripleRDD:RDD[Tuple]) = {
+    val t1 = golfActivityTripleRDD
+      .map{case (s, p, o) => (s, o)}
+    t1
+      .map{case (s, o) => (o, s)}
+      .join(typeTripleRDD)
+      .map{case (o, (s, c)) =>  ((s, c), 1)}
+      .reduceByKey(_ + _)
+      .map{case ((s, c), count) => (eraseURI(s), (c, count))}
+      .groupByKey()
+      .map{case (s, obj_buffer) => (s, obj_buffer.toList)}
+      .sortBy(_._1, true)
+      .coalesce(1).saveAsTextFile("output2")
+  }
+
+  def getTotalLabelCount(objectLabelTripleRDD:RDD[Tuple], activityTripleRDD:RDD[Triple]): Unit = {
     val objectCountRDD = activityTripleRDD
       .map{ case (s, p, o) => (o, 1) }
       .reduceByKey(_ + _)
@@ -49,7 +67,7 @@ object AutoRule {
       .coalesce(1).saveAsTextFile("labelCount")
   }
 
-  def getObjectCount(activityTripleRDD:RDD[Triple], withoutIndex:Boolean = false) ={
+  def getTotalShotCount(activityTripleRDD:RDD[Triple], withoutIndex:Boolean = false) ={
     var rstRDD:RDD[(String, Int)] = activityTripleRDD.map{ case (s, p, o) => (eraseVideoIDString(o) , 1)}
     val path = if(withoutIndex) { "objectCountWithoutIndex" } else { "objectCount" }
     if(withoutIndex){
@@ -78,9 +96,12 @@ object AutoRule {
     }
   }
 
-  def getLabel(triple: RDD[Triple]): RDD[Tuple] ={
+  def getType(triple: RDD[Triple]): RDD[Tuple] = { getPredicate(triple, RDF_TYPE) }
+  def getLabel(triple: RDD[Triple]): RDD[Tuple] ={ getPredicate(triple, RDF_LABEL) }
+
+  def getPredicate(triple: RDD[Triple], predicate:String): RDD[Tuple] = {
     triple
-      .filter{case (s, p, o) => p.contains(RDF_LABEL)}
+      .filter{case (s, p, o) => p.contains(predicate)}
       .map{case (s, p, o) => (s, o)}
   }
   def isGolfVideo(videoID: String): Boolean = {
@@ -102,7 +123,13 @@ object AutoRule {
   }
   def eraseURI(str:String): String ={
     val reg = new Regex("([A-Z]\\w+)")
-    reg.findAllIn(str).matchData.next().group(1)
+    if(reg == null)
+    {
+      return str
+    }else{
+      reg.findAllIn(str).matchData.next().group(1)
+    }
+
   }
 
   def getHasVisualAndHasAural(tripleRDD: RDD[Triple]) = {
