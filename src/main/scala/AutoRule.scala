@@ -1,6 +1,6 @@
 import java.text.SimpleDateFormat
-import java.util.{Calendar, Date}
-
+import java.util.{NoSuchElementException, Calendar, Date}
+import scala.collection.Map
 import org.apache.log4j.{Level, Logger}
 import org.apache.spark.rdd.RDD
 import org.apache.spark.{SparkConf, SparkContext}
@@ -19,6 +19,8 @@ object AutoRule {
   val RDF_LABEL = "<http://www.w3.org/2000/01/rdf-schema#label>"
   val RDF_TYPE = "<http://www.w3.org/1999/02/22-rdf-syntax-ns#type>"
   val DATAFRAME_OUTPUT_FORMAT = "com.databricks.spark.csv"
+  val WHAT_BEHAVIOR = "hasWhatBehavior"
+  val WHAT_OBJECT = "hasWhatObject"
 
   def main(args: Array[String]) {
     setLogLevel(Level.WARN)
@@ -36,27 +38,75 @@ object AutoRule {
 
     // 전체 Triple 중에 Golf Event만 추출한 RDD
     val golfEventTripleRDD = getGolfEventTripleRDD(hasVisualAndHasAuralTripleRDD)
+//
+//    // Golｆ Event의 Shot에 포함 된 Object 별 갯수 정보를 가지고 있는 RDD
+//    val totalCountRDD = getNumberOfObjectInShotRDD(golfEventTripleRDD, true)
+//    totalCountRDD.coalesce(1).saveAsTextFile(generatePath("total_object_in_shot"))
+//
+//    // Golf Event의 Shot마다 Object의 갯수 정보를 DataFrame으로 만들기 위한
+//    // 사전 작업으로 DataFrame의 Header 에 해당하는 Field Name을 가져오기 위한 작업.
+//    val objectNameFieldNames = golfEventTripleRDD.map{case (s, p, o) => eraseIndex(eraseVideoIDString(o))}.distinct().collect().toList
+//
+//    // DataFrame의 기반이 될 RDD로
+//    // Event의 Shot 마다 각각의 Object 갯수 정보를 가지고 있는 RDD.
+//    val resultRDD = getCountEachShotObjectNameInVideoRDD(golfEventTripleRDD)
+//
+//    // Event의 Shot 마다 각각의 Object 갯수 정보를 가지고 있는 RDD를
+//    // 기반으로 DataFrame 생성.
+//    val resultDF = getCountEachShotInVideoDF(resultRDD, objectNameFieldNames, sqlContext)
+//    resultDF.coalesce(1).write
+//      .format(DATAFRAME_OUTPUT_FORMAT).option("header", "true")
+//      .save(generatePath("count_each_shot_object_name_in_video"))
+//
+//    // Event의 Shot 마다 각각의 Object 갯수 정보를 가지고 있는 RDD를
+//    // 기반으로 Object가 하나라도 있으면 1, 없으면 0인 DataFrame
+//    val oneHotEncodeDF = getOneHotEncodeDF(resultRDD, objectNameFieldNames, sqlContext)
+//    oneHotEncodeDF.coalesce(1).write
+//      .format(DATAFRAME_OUTPUT_FORMAT).option("header", "true")
+//      .save(generatePath("one_hot"))
 
-    // Golｆ Event의 Shot에 포함 된 Object 별 갯수 정보를 가지고 있는 RDD
-    val totalCountRDD = getNumberOfObjectInShotRDD(golfEventTripleRDD, true)
-    totalCountRDD.coalesce(1).saveAsTextFile(generatePath("total_object_in_shot"))
+    val result = getTempActivtyType(getGolfEventTripleRDD(inputTripleRDD),objectLabelTupleRDD)
+    val eventTripleRDD = getGolfEventTripleRDD(inputTripleRDD).map{case (s, p, o) => List(s, p, o, ".").mkString(" ")}.coalesce(1).saveAsTextFile(generatePath())
 
-    // Golf Event의 Shot마다 Object의 갯수 정보를 DataFrame으로 만들기 위한
-    // 사전 작업으로 DataFrame의 Header 에 해당하는 Field Name을 가져오기 위한 작업.
-    val objectNameFieldNames = golfEventTripleRDD.map{case (s, p, o) => eraseIndex(eraseVideoIDString(o))}.distinct().collect().toList
-
-    // DataFrame의 기반이 될 RDD로
-    // Event의 Shot 마다 각각의 Object 갯수 정보를 가지고 있는 RDD.
-    val resultRDD = getCountEachShotObjectNameInVideoRDD(golfEventTripleRDD)
-
-    // Event의 Shot 마다 각각의 Object 갯수 정보를 가지고 있는 RDD를
-    // 기반으로 DataFrame 생성.
-    val resultDF = getCountEachShotInVideoDF(resultRDD, objectNameFieldNames, sqlContext)
-    resultDF.coalesce(1).write
-      .format(DATAFRAME_OUTPUT_FORMAT).option("header", "true")
-      .save(generatePath("count_each_shot_object_name_in_video"))
   }
 
+  def getTempActivtyType(eventTripleRDD:RDD[Triple], labelTripleRDD:RDD[Triple]) = {
+    val labelMap = labelTripleRDD.map{case (s, p, o) => (s, o)}.collectAsMap()
+    val activityTupleRDD = eventTripleRDD
+      .filter{case (s, p, o) => p.contains(WHAT_BEHAVIOR) || p.contains(WHAT_OBJECT)}
+      .map{case (s, p, o) => (s, (p, o))}
+      .groupByKey()
+      .map{case (s, activities) => (s, changeObjectToName(activities, labelMap))}
+      .sortByKey()
+    activityTupleRDD
+
+  }
+  def changeObjectToName(iterator: Iterable[Tuple], labelMap :Map[String, String]) ={
+    var activityList = List[String]()
+    for((p, o) <- iterator){
+      activityList = activityList ++ List(labelMap(o))
+    }
+    activityList.mkString("-")
+  }
+  /**
+    *
+    * @param countEachShotInVideoRDD
+    * @param fieldNames
+    * @param sqlContext
+    * @return
+    */
+  def getOneHotEncodeDF(countEachShotInVideoRDD:RDD[(String, List[(String, Int)])], fieldNames:List[String], sqlContext:SQLContext) = {
+    val rowRDD = countEachShotInVideoRDD
+      .map{case (videoShotID, elementList) => convertListToOneHotRow(videoShotID, elementList, fieldNames)}
+    val newFieldNames = List("VideoShotID") ++ fieldNames
+    val schema = StructType(
+      newFieldNames.map {
+        case fieldName@"VideoShotID" => StructField(fieldName, StringType, true)
+        case fieldName => StructField(fieldName, IntegerType, true)
+      }
+    )
+    sqlContext.createDataFrame(rowRDD, schema)
+  }
   /**
     * * RDD 를 파일로 저장할 때
     * 저장 경로를 중복되지 않도록
@@ -91,9 +141,22 @@ object AutoRule {
     Row.fromSeq(List(videoShotID) ++ fieldNames.map(fieldName => states(fieldName)))
   }
 
+  def convertListToOneHotRow(videoShotID:String, list:List[(String, Int)], fieldNames:List[String]): Row = {
+    val states = initMap(fieldNames)
+    for((c, count) <- list){
+      if(count >= 1){
+        states(c) = 1
+      }else {
+        states(c) = 0
+      }
+    }
+    Row.fromSeq(List(videoShotID) ++ fieldNames.map(fieldName => states(fieldName)))
+  }
+
   /**
     * Row의 값을 넣어주기 위한 사전 처리 작업을
     * 수행하는 함수.
+ *
     * @param fieldNames Field 이름 리스트
     * @return             (Golf -> 1), (Person -> 2) ... 와 같은 형태의 Map.
     */
@@ -108,6 +171,7 @@ object AutoRule {
   /**
     * 각 Shot의 포함된 Object에 갯수를
     * DataFrame으로 만들어주는 함수.
+ *
     * @param countEachShotInVideoRDD  새로운 DataFrame의 기반이 되는 RDD
     * @param fieldNames                 DataFrame 의 Header에 들어갈 Field 이름.
     * @param sqlContext                 DataFrame을 만들기 위한 SQL Context
@@ -227,14 +291,14 @@ object AutoRule {
     * @param triple
     * @return
     */
-  def getTypeTriple(triple: RDD[Triple]): RDD[Tuple] = { getPredicate(triple, RDF_TYPE) }
+  def getTypeTriple(triple: RDD[Triple]): RDD[Triple] = { getPredicate(triple, RDF_TYPE) }
 
   /**
     *
     * @param triple
     * @return
     */
-  def getLabelTriple(triple: RDD[Triple]): RDD[Tuple] ={ getPredicate(triple, RDF_LABEL) }
+  def getLabelTriple(triple: RDD[Triple]): RDD[Triple] ={ getPredicate(triple, RDF_LABEL) }
 
   /**
     *
@@ -242,10 +306,9 @@ object AutoRule {
     * @param predicate
     * @return
     */
-  def getPredicate(triple: RDD[Triple], predicate:String): RDD[Tuple] = {
+  def getPredicate(triple: RDD[Triple], predicate:String): RDD[Triple] = {
     triple
       .filter{case (s, p, o) => p.contains(predicate)}
-      .map{case (s, p, o) => (s, o)}
   }
 
   /**
@@ -256,10 +319,15 @@ object AutoRule {
   def isGolfVideo(videoID: String): Boolean = {
     // Golf Activity는 Video 1번 부터 100번 까지 이다.
     val reg = new Regex("([0-9]+)")
-    val tokens = reg.findAllIn(videoID)
-    val id = Integer.valueOf(tokens.next())
-
-    return 100 >= id
+    var id = 1000
+    try{
+      id = reg.findAllIn(videoID).matchData.next().group(1).toInt
+      100 >= id
+    }catch {
+      case nse: NoSuchElementException => {
+        false
+      }
+    }
   }
 
   /**
