@@ -2,9 +2,13 @@ package ontology
 
 import java.util.NoSuchElementException
 
+import org.apache.commons.math.distribution.NormalDistributionImpl
+import org.apache.parquet.filter2.predicate.Operators.Column
 import org.apache.spark.rdd.RDD
-import org.apache.spark.sql.types.{IntegerType, StringType, StructField, StructType}
-import org.apache.spark.sql.{Row, SQLContext}
+import org.apache.spark.sql
+import org.apache.spark.sql.functions._
+import org.apache.spark.sql.types._
+import org.apache.spark.sql.{Row, SQLContext, Column}
 
 import scala.collection.Map
 import scala.util.matching.Regex
@@ -20,7 +24,63 @@ object MediaOntology {
 
   val WHAT_BEHAVIOR = "hasWhatBehavior"
   val WHAT_OBJECT = "hasWhatObject"
+  val CLOSURE_AXIOM = "closure"
+  val EXISTENTIAL_AXIOM = "existential"
+  val UNIVERSAL_AXIOM = "universal"
 
+  /**
+    *
+    * @param eventRDD
+    * @param sqlContext
+    * @param alpha
+    * @return
+    */
+  def getAutoDescription(eventRDD:RDD[Triple], sqlContext: SQLContext, alpha:Double = 0.2) = {
+    val numberOfCountDF = getNumberOfCountEachObjectNameDF(eventRDD, sqlContext)
+
+    // Event에 Object 출현 빈도값들의 표준편차 값(Standard Deviation)을 구한다.
+    val stdd = numberOfCountDF.agg(stddev_pop("count")).map(row => row.getDouble(0)).collect()(0)
+
+    // Event에 Object 출현 빈도값들의 평균 값을 구한다.
+    val mean = numberOfCountDF.agg(avg("count")).map(row => row.getDouble(0)).collect()(0)
+
+    println(String.format("Standard deviation = %s\nMean = %s", stdd.toString, mean.toString))
+
+    // 정규편차(Normal Distribution)값을 구하기 위한 객체를 생성.
+    val normDistCalculator = new NormalDistributionImpl(mean, stdd)
+    // Event에 Object 출현 빈도 값의 누적 편차 값을 구한다.
+    val rows = numberOfCountDF
+      .map(row => Row(row(0).toString, normDistCalculator.cumulativeProbability(row.getInt(1).toDouble)))
+
+    val schema = StructType(
+      Seq(StructField("object_name", StringType),
+        StructField("cdf_value", DoubleType))
+    )
+
+    // 표준 편차값과 평균값을 가지고 기준값을 정한다.
+    // Cumulative Distribution Function (누적 분포 함수) 값.
+    val threshold = normDistCalculator.cumulativeProbability(stdd + mean)
+    val lambda = 0.2
+
+    println("Threshold value = " + threshold)
+    println("Alpha = " + alpha)
+
+    val resultsDF = sqlContext.createDataFrame(rows, schema)
+      .map(row => (row.getString(0), row.getDouble(1)))
+      .map{case (objName, cdf) =>
+        if(threshold <= cdf){
+          (CLOSURE_AXIOM, objName)
+        }else if((threshold - alpha) < cdf && cdf < threshold){
+          (EXISTENTIAL_AXIOM, objName)
+        }else{
+          (UNIVERSAL_AXIOM, objName)
+        }
+      }
+      .groupByKey()
+      .map{case (axiom, objList) => (axiom, objList.toList)}
+
+    resultsDF
+  }
   def getTotalCount(videoIndexRange:Range, mediaTripleRDD:RDD[Triple]):RDD[(String, Int)] = {
     val eventRDD = getEventTripleRDD(mediaTripleRDD, videoIndexRange)
     getNumberOfObjectInShotRDD(eventRDD, true)
@@ -100,6 +160,24 @@ object MediaOntology {
       .map{ case (o, (l, c)) => (l, c)}
       .reduceByKey(_ + _)
       .sortBy(_._2, false)
+  }
+
+  /**
+    *
+    * @param eventTriple
+    * @param sqlContext
+    * @return
+    */
+  def getNumberOfCountEachObjectNameDF(eventTriple: RDD[Triple], sqlContext: SQLContext) = {
+    val hasVisualAndAuralTripleRDD = getHasVisualAndHasAural(eventTriple)
+    val countEachShotInEventRDD = getCountEachShotObjectNameInVideoRDD(hasVisualAndAuralTripleRDD)
+
+    val schema = StructType(
+      Seq(StructField("object_name", StringType, true),
+      StructField("count", IntegerType, true))
+    )
+
+    sqlContext.createDataFrame(countEachShotInEventRDD.flatMap{case (shot, element) => element}.reduceByKey(_ + _).map{case (objectName, count) => Row(objectName, count)},schema)
   }
 
   def getOneHotEncodeDF(eventTriple: RDD[Triple], sqlContext: SQLContext) = {
