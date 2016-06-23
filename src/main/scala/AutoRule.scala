@@ -1,12 +1,13 @@
-
+import org.apache.commons.math.distribution.{NormalDistributionImpl, NormalDistribution}
 import org.apache.log4j.{Level, Logger}
+import org.apache.spark.sql.types._
 import org.apache.spark.{SparkConf, SparkContext}
 import org.apache.spark.sql._
 
 import ontology.MediaOntology._
 
 import spark.util.Util._
-import ontology.util.parser.Parser._
+import org.apache.spark.sql.functions.{cume_dist, avg, max, stddev_pop}
 
 /**
   * Created by NK on 2016. 6. 9..
@@ -34,6 +35,19 @@ object AutoRule {
       "Toddle" -> Range(455, 554)
     )
 
+    eventRangeMap.foreach{ case (key, value) =>
+      val eventRDD = getEventTripleRDD(inputTripleRDD, value)
+      println("=================================================")
+      println(key + " Event")
+      println("=================================================")
+      val resultRDD = getAutoDescription(eventRDD, sqlContext)
+
+      for( (axiom, descs) <- resultRDD.collect() ){
+        println(String.format("\nAxiom : [ %s ]\nCandidate Object : [ %s ]", axiom, descs.mkString(", ")))
+      }
+      println("=================================================")
+    }
+
 //    eventRangeMap.foreach{ case (key, value) =>
 //      val eventRDD = getEventTripleRDD(inputTripleRDD, value)
 //      val oneHotEncodeDF = getOneHotEncodeDF(eventRDD, sqlContext)
@@ -42,15 +56,15 @@ object AutoRule {
 //        .save(generatePath(key+"_one-hot"))
 //    }
 
-    val labelTripleRDD = getLabelTriple(inputTripleRDD)
-
-    eventRangeMap.foreach{ case (key, value) =>
-      val eventRDD = getEventTripleRDD(inputTripleRDD, value)
-      val activtyRDD = getTempActivtyType(eventRDD, labelTripleRDD)
-      activtyRDD
-        .map{case(shot, activities) => List(shot, activities).mkString(",")}
-        .coalesce(1).saveAsTextFile(generatePath(key+"_activities"))
-    }
+//    val labelTripleRDD = getLabelTriple(inputTripleRDD)
+//
+//    eventRangeMap.foreach{ case (key, value) =>
+//      val eventRDD = getEventTripleRDD(inputTripleRDD, value)
+//      val activtyRDD = getTempActivtyType(eventRDD, labelTripleRDD)
+//      activtyRDD
+//        .map{case(shot, activities) => List(shot, activities).mkString(",")}
+//        .coalesce(1).saveAsTextFile(generatePath(key+"_activities"))
+//    }
 
 
 
