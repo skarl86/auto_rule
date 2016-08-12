@@ -1,14 +1,13 @@
 package ontology
 
-import java.util.NoSuchElementException
+import java.util.{NoSuchElementException}
 
+import nkutil.encode.Unicode
 import org.apache.commons.math.distribution.NormalDistributionImpl
-import org.apache.parquet.filter2.predicate.Operators.Column
 import org.apache.spark.rdd.RDD
-import org.apache.spark.sql
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.types._
-import org.apache.spark.sql.{Row, SQLContext, Column}
+import org.apache.spark.sql.{Row, SQLContext}
 
 import scala.collection.Map
 import scala.util.matching.Regex
@@ -23,10 +22,41 @@ object MediaOntology {
   type Tuple = (String, String)
 
   val WHAT_BEHAVIOR = "hasWhatBehavior"
+  val HAS_VISUAL = "hasVisual"
+  val HAS_AURAL = "hasAural"
   val WHAT_OBJECT = "hasWhatObject"
+  val HAS_ACTIVITY = "hasActivity"
+
   val CLOSURE_AXIOM = "closure"
   val EXISTENTIAL_AXIOM = "existential"
   val UNIVERSAL_AXIOM = "universal"
+
+  /**
+    *
+    * @param inputRDD
+    * @return
+    */
+  def getHasActivityTripleRDD(inputRDD:RDD[Triple]) = {
+    inputRDD.filter{case (s, p, o) => p.contains(HAS_ACTIVITY)}
+  }
+
+  /**
+    *
+    * @param eventRDD
+    * @param sqlContext
+    */
+  def getActivityAutoDescription(eventRDD:RDD[Triple], sqlContext: SQLContext) = {
+    val hasObjectTripleRDD = getHasVisualAndHasAural(eventRDD)
+    val hasActivityTripleRDD = getHasActivityTripleRDD(eventRDD)
+
+    val shotAndObjectsPairRDD = hasObjectTripleRDD.map{case (s, p ,o) => (eraseURI(s), eraseIndexWithoutPrefix(eraseURI(o)))}.groupByKey()
+    val shotAndActivitiesPairRDD = hasActivityTripleRDD.map{case (s, p, o) => (eraseURI(s), Unicode.decode(eraseURI(o)))}
+
+    val activityAndObjects = shotAndActivitiesPairRDD
+      .join(shotAndObjectsPairRDD)
+      .map{case(shot, (activity, objects)) => (activity, objects)}
+      .groupByKey().map{case (activity, objects) => (activity, objects.flatten)}
+  }
 
   /**
     *
@@ -81,6 +111,13 @@ object MediaOntology {
 
     resultsDF
   }
+
+  /**
+    *
+    * @param videoIndexRange
+    * @param mediaTripleRDD
+    * @return
+    */
   def getTotalCount(videoIndexRange:Range, mediaTripleRDD:RDD[Triple]):RDD[(String, Int)] = {
     val eventRDD = getEventTripleRDD(mediaTripleRDD, videoIndexRange)
     getNumberOfObjectInShotRDD(eventRDD, true)
@@ -103,6 +140,10 @@ object MediaOntology {
     */
   def getEventTripleRDD(tripleRDD: RDD[Triple], videoIDRange: Range) = {
     tripleRDD.filter{case (s, p, o) => isEventVideo(s, videoIDRange)}
+  }
+
+  def getEventNameTripleRDD(tripleRDD: RDD[Triple], eventNameURI: String) = {
+    tripleRDD.filter{case (s, p, o) => o.contains(eventNameURI)}
   }
 
   /**

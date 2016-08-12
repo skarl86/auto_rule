@@ -59,6 +59,17 @@ object StringUtil {
 
   }
 
+  def eraseIndexWithoutPrefix(objectName:String): String ={
+    try{
+      val reg = new Regex("_(\\w+[a-z]+)")
+      reg.findAllIn(objectName).matchData.next().group(1)
+    }catch {
+      case nse: NoSuchElementException => {
+        objectName
+      }
+    }
+  }
+
 
   /**
     *
@@ -66,7 +77,7 @@ object StringUtil {
     * @return
     */
   def eraseURI(str:String): String ={
-    val reg = new Regex("([A-Z]\\w+)")
+    val reg = new Regex("([A-Z].+)>")
     if(reg == null)
     {
       str

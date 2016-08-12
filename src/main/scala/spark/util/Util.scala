@@ -1,7 +1,7 @@
 package spark.util
 
 import java.text.SimpleDateFormat
-import java.util.Calendar
+import java.util.{NoSuchElementException, Calendar}
 
 import org.apache.log4j.{Logger, Level}
 
@@ -44,10 +44,18 @@ object Util {
   def NTripleParser(lines: Iterator[String]) = {
     val TripleParser = new Regex("(<[^\\s]*>)|(_:[^\\s]*)|(\".*\")")
     for (line <- lines) yield {
-      val tokens = TripleParser.findAllIn(line)
-      val (s, p, o) = (tokens.next(), tokens.next(), tokens.next())
-      (s, p, o)
+      try{
+        val tokens = TripleParser.findAllIn(line)
+        val (s, p, o) = (tokens.next(), tokens.next(), tokens.next())
+        (s, p, o)
+
+      }catch {
+        case nse: NoSuchElementException => {
+          ("ERROR", "ERROR", "ERROR")
+        }
+      }
     }
+
   }
 
 }
